@@ -1,9 +1,17 @@
-"""PDF access: page rendering, native text layer, and figure cropping (PyMuPDF).
+"""PDF access: page slicing, native text layer, and figure cropping (PyMuPDF).
 
-The text layer is rebuilt in reading order: fragments are joined into lines by baseline, two-column
-pages are read left column then right column (full-width lines such as headings split the page into
-bands), and running headers/footers that repeat across pages are removed. PyMuPDF's own
-`sort=True` interleaves the two columns line by line, which garbles questions.
+Pages go to the model as one-page PDFs, not as rasterised images: the model runs its own layout and
+OCR pass over the original vectors, which reads multi-column papers and option grids far better than
+our text layer ever did. PyMuPDF is used only to cut pages out, to crop figures, and to read the text
+layer for the few places that need exact characters.
+
+The text layer is NOT sent to the model any more. It is rebuilt in reading order here because two
+things still need it: the strict parse of answer-key grids printed in the paper (`keys.py`), where
+exact characters beat a model reading, and `HeuristicProvider`, the offline no-API-key mode.
+Fragments are joined into lines by baseline, two-column pages are read left column then right column
+(full-width lines such as headings split the page into bands), and running headers/footers that repeat
+across pages are removed. PyMuPDF's own `sort=True` interleaves the two columns line by line, which
+garbles questions.
 """
 
 import re
@@ -17,8 +25,8 @@ import pymupdf
 @dataclass
 class PageContent:
     index: int  # 0-based page index in the document
-    png: bytes
-    text: str  # native text layer; empty for scanned pages
+    pdf: bytes  # this single page as a standalone one-page PDF, as sent to the model
+    text: str  # native text layer; empty for scanned pages. Never sent to the model; see module docstring.
     width: float
     height: float
     removed: list[str] = field(default_factory=list)  # running headers/footers stripped from `text`
@@ -68,6 +76,45 @@ def _fragments(page: pymupdf.Page) -> list[_Frag]:
     return out
 
 
+def _table_markdown(table) -> str:
+    """A detected table as a Markdown pipe table, or "" if it is not worth keeping.
+
+    `to_markdown()` is not used: it labels an empty header cell "Col1" and joins wrapped
+    cell text with a literal <br>, which the question renderer escapes and shows verbatim.
+    """
+    rows = [
+        [(cell or "").replace("\n", " ").replace("|", "/").strip() for cell in row]
+        for row in table.extract()
+    ]
+    rows = [r for r in rows if any(r)]
+    if len(rows) < 2 or len(rows[0]) < 2:
+        return ""
+    head, *body = rows
+    out = ["| " + " | ".join(head) + " |", "| " + " | ".join("---" for _ in head) + " |"]
+    out += ["| " + " | ".join(r + [""] * (len(head) - len(r))) + " |" for r in body]
+    return "\n".join(out)
+
+
+def _tables(page: pymupdf.Page) -> list[tuple[pymupdf.Rect, str]]:
+    """Ruled tables on the page, as Markdown.
+
+    Only tables drawn with real lines count (`lines_strict`). Exam papers lay options and
+    two-column text out on an invisible grid, and the looser strategies read those as tables,
+    which would wreck ordinary questions. A paper's matching table is always ruled.
+    """
+    try:
+        found = page.find_tables(strategy="lines_strict").tables
+    except Exception:  # pragma: no cover - a malformed page must not fail the whole extraction
+        return []
+    out = []
+    for table in found:
+        if table.row_count < 2 or table.col_count < 2:
+            continue
+        if md := _table_markdown(table):
+            out.append((pymupdf.Rect(table.bbox), md))
+    return out
+
+
 def _gutter(frags: list[_Frag], width: float) -> float | None:
     """x of the gap between two columns, or None for a single-column page."""
     if len(frags) < 8:
@@ -90,6 +137,11 @@ def reading_order_lines(page: pymupdf.Page) -> list[tuple[str, float]]:
     """(line, vertical position 0-1) in reading order."""
     frags = _fragments(page)
     height = page.rect.height or 1
+    # Swap each ruled table for one fragment holding its Markdown. Without this the table's
+    # rows arrive as loose lines ("Supersonic Cruise" on its own) and the pairing is lost.
+    for rect, md in _tables(page):
+        frags = [f for f in frags if not (rect.x0 - 2 <= (f.x0 + f.x1) / 2 <= rect.x1 + 2 and rect.y0 - 2 <= (f.y0 + f.y1) / 2 <= rect.y1 + 2)]
+        frags.append(_Frag(rect.x0, rect.y0, rect.x1, rect.y1, md))
     gutter = _gutter(frags, page.rect.width)
     if gutter is None:
         return _positioned(frags, height)
@@ -216,13 +268,24 @@ def _running_lines(pages: list[list[tuple[str, float]]]) -> set[str]:
     return {k for k, n in counts.items() if n >= need}
 
 
-def render_pages(path: str | Path, dpi: int) -> list[PageContent]:
+def one_page_pdf(doc: pymupdf.Document, page_index: int) -> bytes:
+    """One page of `doc` as a standalone single-page PDF.
+
+    Vectors, fonts and embedded images are copied as they are, so the model sees the page at full
+    fidelity instead of a flattened raster. Annotations are dropped: highlights and sticky notes left
+    in a downloaded paper are not part of the printed question."""
+    with pymupdf.open() as out:
+        out.insert_pdf(doc, from_page=page_index, to_page=page_index, annots=False)
+        return out.tobytes(garbage=3, deflate=True)
+
+
+def load_pages(path: str | Path) -> list[PageContent]:
+    """Every page as a one-page PDF, plus its text layer for the key parser and heuristic mode."""
     pages: list[PageContent] = []
     with pymupdf.open(path) as doc:
         ordered = [reading_order_lines(page) for page in doc]
         running = _running_lines(ordered)
         for page, lines in zip(doc, ordered):
-            pix = page.get_pixmap(dpi=dpi)
             kept, removed = [], []
             for text, y in lines:
                 strip = _in_margin(y) and _boilerplate_key(text, y) in running
@@ -230,7 +293,7 @@ def render_pages(path: str | Path, dpi: int) -> list[PageContent]:
             pages.append(
                 PageContent(
                     index=page.number,
-                    png=pix.tobytes("png"),
+                    pdf=one_page_pdf(doc, page.number),
                     text="\n".join(kept),
                     width=page.rect.width,
                     height=page.rect.height,

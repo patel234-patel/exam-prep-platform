@@ -123,11 +123,20 @@ class Document(Base):
     # For kind=solutions: parsed entries [{"number", "answer", "numerical_answer", "explanation", "pages", "source"}].
     answer_key: Mapped[list | None] = mapped_column(JsonType)
     uploaded_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    # Marking scheme the admin set when uploading a test series. None falls back to the
+    # scheme the AI read off the paper (`profile`), then to the Test defaults.
+    duration_minutes: Mapped[int | None] = mapped_column(Integer)
+    marks_correct: Mapped[float | None] = mapped_column(Float)
+    marks_incorrect: Mapped[float | None] = mapped_column(Float)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     exam: Mapped[Exam | None] = relationship()
     institution: Mapped[Institution | None] = relationship()
-    jobs: Mapped[list["ExtractionJob"]] = relationship(back_populates="document", order_by="ExtractionJob.id")
+    # `passive_deletes` leaves the cascade to the database (`extraction_jobs.document_id` is NOT NULL,
+    # so the ORM's default of nulling it out on delete would fail).
+    jobs: Mapped[list["ExtractionJob"]] = relationship(
+        back_populates="document", order_by="ExtractionJob.id", cascade="all, delete-orphan", passive_deletes=True
+    )
     solutions_for: Mapped["Document | None"] = relationship(remote_side="Document.id", foreign_keys=[solutions_for_id])
 
 
@@ -263,6 +272,21 @@ class AttemptAnswer(Base):
     marks_awarded: Mapped[float] = mapped_column(Float, default=0.0)
 
     attempt: Mapped[Attempt] = relationship(back_populates="answers")
+
+
+class ExamTarget(Base):
+    """An exam a student is counting down to on their dashboard. Several are allowed."""
+
+    __tablename__ = "exam_targets"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    # Stored as YYYY-MM-DD: the countdown runs to local midnight of that day, so a
+    # date the student picked never shifts because of their timezone.
+    target_date: Mapped[str] = mapped_column(String(10))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 
 class PyqProgress(Base):

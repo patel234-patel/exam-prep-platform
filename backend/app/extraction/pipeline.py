@@ -49,7 +49,7 @@ from app.extraction.merge import (
     revalidate,
     validate_question,
 )
-from app.extraction.pdf import PageContent, crop_figure, render_pages
+from app.extraction.pdf import PageContent, crop_figure, load_pages
 from app.extraction.providers import ExtractionProvider, HeuristicProvider, QuotaExhausted, build_provider
 from app.extraction.schemas import AnswerKeyEntry, ChunkExtraction, DocumentProfile
 from app.models import (
@@ -64,8 +64,13 @@ from app.models import (
 
 log = logging.getLogger(__name__)
 Progress = Callable[[str, float], None]
+# Bump when the page text layer changes shape. The cache is keyed on the document hash and the
+# request, so a change in how pages are read would otherwise be invisible to it and a re-extraction
+# would replay stale results. "2" = ruled tables are kept as Markdown instead of being flattened.
+_TEXT_LAYER_VERSION = "2"
 _PROMPT_VERSION = hashlib.sha1(
-    (prompts.CHUNK_PROMPT + prompts.FOCUS_PROMPT + prompts.SOLUTIONS_PROMPT + prompts.PROFILE_PROMPT).encode()
+    (prompts.CHUNK_PROMPT + prompts.FOCUS_PROMPT + prompts.SOLUTIONS_PROMPT + prompts.PROFILE_PROMPT
+     + _TEXT_LAYER_VERSION).encode()
 ).hexdigest()[:10]
 
 
@@ -141,8 +146,8 @@ def extract_document(
 ) -> tuple[DocumentProfile, list[MergedQuestion], dict]:
     t0 = time.monotonic()
     cache = cache or ChunkCache(None)
-    progress("rendering", 0.02)
-    pages = render_pages(pdf_path, settings.render_dpi)
+    progress("loading", 0.02)
+    pages = load_pages(pdf_path)
     stats: dict = {
         "provider": provider.name,
         "pages": len(pages),
@@ -364,8 +369,8 @@ def extract_solutions_document(
 ) -> tuple[list[dict], dict]:
     t0 = time.monotonic()
     cache = cache or ChunkCache(None)
-    progress("rendering", 0.05)
-    pages = render_pages(pdf_path, settings.render_dpi)
+    progress("loading", 0.05)
+    pages = load_pages(pdf_path)
     incomplete = {p.index for p in pages if p.text_incomplete}
     stats: dict = {"provider": provider.name, "pages": len(pages), "incomplete_text_pages": sorted(i + 1 for i in incomplete)}
 

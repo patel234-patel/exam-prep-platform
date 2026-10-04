@@ -103,6 +103,10 @@ export interface DocumentInfo {
   year: number | null;
   page_count: number;
   profile: Record<string, unknown> | null;
+  /** Marking scheme chosen at upload; test series only. */
+  duration_minutes: number | null;
+  marks_correct: number | null;
+  marks_incorrect: number | null;
   created_at: string;
   latest_job: Job | null;
   question_counts: Record<string, number>;
@@ -264,15 +268,81 @@ export interface PyqStats {
   accuracy: number;
   by_subject: { subject: string; total: number; solved: number; correct: number }[];
 }
+export interface ContinueTest {
+  attempt_id: number;
+  test_id: number;
+  test_title: string;
+  sections: string[];
+  question_count: number;
+  answered: number;
+  seconds_left: number;
+  expired: boolean;
+  started_at: string;
+}
 export interface Dashboard {
   user: { name: string };
-  totals: { tests_taken: number; avg_percent: number; best_percent: number; accuracy: number; hours_practiced: number };
-  trend: { attempt_id: number; test_title: string; date: string; score: number; max_score: number; percent: number; accuracy: number }[];
+  totals: {
+    tests_taken: number;
+    avg_percent: number;
+    best_percent: number;
+    accuracy: number;
+    hours_practiced: number;
+    tests_this_week: number;
+    hours_this_week: number;
+    avg_delta_30d: number | null;
+  };
+  streak: { current: number; best: number };
+  activity: { start: string; days: { date: string; tests: number; minutes: number }[] };
+  continue_test: ContinueTest | null;
+  trend: {
+    attempt_id: number;
+    test_title: string;
+    date: string;
+    score: number;
+    max_score: number;
+    percent: number;
+    accuracy: number;
+    sections: string[];
+  }[];
   sections: { name: string; correct: number; incorrect: number; unattempted: number; time_seconds: number; accuracy: number }[];
   weak_areas: string[];
   recent: Dashboard["trend"];
   pyq: PyqStats;
 }
+export interface Mistake {
+  id: number;
+  question_id: number;
+  attempt_id: number;
+  test_id: number;
+  test_title: string;
+  attempted_at: string | null;
+  section: string;
+  subject: string | null;
+  topic: string | null;
+  number: string;
+  type: QuestionType;
+  text: string;
+  options: Option[];
+  images: Figure[];
+  response: string[] | string | null;
+  answer: Answer;
+  explanation: string | null;
+  marks_awarded: number;
+  time_spent_seconds: number;
+}
+export interface MistakeBook {
+  total: number;
+  items: Mistake[];
+  tests: { id: number; title: string }[];
+  sections: string[];
+}
+export interface ExamTarget {
+  id: number;
+  name: string;
+  /** YYYY-MM-DD; the countdown runs to local midnight of this day. */
+  target_date: string;
+}
+
 export interface AttemptSummary {
   id: number;
   test_id: number;
